@@ -1,0 +1,166 @@
+#I've started with the installation of depedency (as root)
+apt-get update -y && apt-get upgrade -y
+apt-get install sudo vim ufw portsentry fail2ban apache2 mailutils -y
+	|| I had a warning with portsentry. Check screenshot folder.
+
+#Create un non-root user a give him sudo rigth
+su -
+adduser roger
+	|| password: roger
+sudo adduser roger sudo
+visudo
+	|| added roger	ALL=(ALL:ALL) NOPASSWD:ALL
+
+#Setup a static IP
+sudo vim /etc/network/interfaces
+	|| The primary network interface
+	|| auto enp0s3
+sudo vim /etc/network/interfaces.d/enp0s3
+	|| iface enp0s3 inet static
+	|| 		address 10.12.1.125/30
+	|| 		gateway 10.12.254.254
+sudo service networking restart
+ip a
+
+#Partition disk
+sudo fdisk /dev/sda
+F
+p (partition)
+n (new)
+p (primary)
+3 (default)
+start from... (range, start last +1)
++4.2G (taille demandé)
+w (write)
+sudo mkfs.ext4 /dev/sda3 (formate une partition, ecrase pour des blos dispo)
+
+#Change SSH default Port
+sudo vim /etc/ssh/sshd_config
+	|| Uncommented ligne 13: "Port 65432"
+sudo service ssh restart
+ssh roger@10.12.1.125 -p 65432
+
+#Setup SSH access with publickeys
+ssh-keygen -t rsa
+	|| passphrase: roger
+ssh-copy-id -i ~/.ssh/id_rsa.pub roger@10.12.1.125 -p 65432
+sudo vim /etc/ssh/sshd_config
+	|| Uncommented ligne 32: "PermitRootLogin no"
+	|| Uncommented ligne 56: "PasswordAuthentication no"
+sudo service sshd restart
+
+#Setup firewall
+sudo ufw status
+sudo ufw enable
+sudo ufw allow 65432/tcp
+sudo ufw allow 80/tcp
+sudo ufw allow 443
+sudo ufw reload
+sudo ufw status verbose
+
+#Protect against DoS
+sudo cp /etc/fail2ban/jail.conf /etc/fail2ban/jail.local
+sudo vim /etc/fail2ban/jail.local
+	|| add to line 244:
+	|| enabled = true
+	|| port    = 65432
+	|| logpath = %(sshd_log)s
+	|| backend = %(sshd_backend)s
+	|| maxretry = 3
+	|| bantime = 600
+	||
+	|| add to line 266
+	|| [http-get-dos]
+	|| enabled = true
+	|| port = http,https
+	|| filter = http-get-dos
+	|| logpath = /var/log/apache2/access.log 
+	|| maxretry = 300
+	|| findtime = 300
+	|| bantime = 600
+	|| action = iptables[name=HTTP, port=http, protocol=tcp]
+sudo vim /etc/fail2ban/filter.d/http-get-dos.conf
+	|| [Definition]
+	|| failregex = ^<HOST> -.*"(GET|POST).*
+	|| ignoreregex =
+sudo vim /etc/ufw/before.rules
+	|| Allow ping
+	|| -A ufw-before-output -p icmp --icmp-type destination-unreachable -j ACCEPT
+	|| -A ufw-before-output -p icmp --icmp-type source-quench -j ACCEPT
+	|| -A ufw-before-output -p icmp --icmp-type time-exceeded -j ACCEPT
+	|| -A ufw-before-output -p icmp --icmp-type parameter-problem -j ACCEPT
+	|| -A ufw-before-output -p icmp --icmp-type echo-request -j ACCEPT
+sudo ufw reload
+sudo service fail2ban restart
+sudo fail2ban-client status
+sudo tail -f /var/log/fail2ban.log
+sudo fail2ban-client set http-get-dos unbanip 10.12.12.12
+
+#Protection against port scans
+sudo vim /etc/default/portsentry
+	|| TCP_MODE="atcp"
+	|| UDP_MODE="audp"
+	|| "a" signifie advanced, Portsentry va vérifier les ports utilisés et
+	|| automatiquement "lier" les ports disponibles.
+sudo vim /etc/portsentry/portsentry.conf
+	|| Uncommented line 301
+	|| add at the end:
+	|| BLOCK_UDP="1"
+	|| BLOCK_TCP="1"
+	|| commented line 170
+	|| uncommented line 209
+	|| commented line 243
+sudo service portsentry restart
+
+#Stop the services we don’t need
+sudo systemctl disable console-setup.service
+sudo systemctl disable keyboard-setup.service
+sudo systemctl disable apt-daily.timer
+sudo systemctl disable apt-daily-upgrade.timer
+sudo systemctl disable syslog.service
+
+#Update Packages
+echo "sudo apt-get update -y >> /var/log/update_script.log" >> ~/update.sh
+echo "sudo apt-get upgrade -y >> /var/log/update_script.log" >> ~/update.sh
+sudo mv ~/update.sh /root/
+sudo crontab -e
+	|| SHELL=/bin/bash
+	|| PATH=/sbin:/bin:/usr/sbin:/usr/bin
+	|| 
+	|| @reboot sudo sh ~/update.sh
+	|| 0 4 * * 6 sudo sh ~/update.sh
+sudo cat /var/log/update_script.log
+
+#Monitor Crontab Changes
+sudo chown roger /etc/crontab
+su -
+vim monitor_cron_changes.sh
+crontab -e
+	|| 0 0 * * * sudo sh ~/monitor_cron-changes.sh
+cat /var/mail/kipit
+
+#Deploy a Web application reacheable on the machine IP's
+sudo vim /var/www/html/index.html
+
+#Configure SSL Certificates
+sudo vim /etc/apache2/sites-available/000-default.conf
+	|| Redirect "/" "https://10.12.1.125/"
+cd /etc/ssl/certs/
+sudo openssl req -x509 -nodes -days 365 -newkey rsa:2048 -keyout roger.key -out roger.crt
+sudo vim /etc/apache2/sites-available/default-ssl.conf
+	|| ServerName bitconnect
+	|| SSL Engine on
+	|| SSLCertificateFile /etc/ssl/certs/roger.crt
+	|| SSLCertificateKeyFile /etc/ssl/certs/roger.key
+sudo a2enmod ssl
+sudo a2enmod headers
+sudo a2ensite default-ssl
+systemctl reload apache2
+
+#Connect with ssh when password authentification is disabled
+ssh-keygen -t rsa -f kipit
+ssh-copy-id -i ~/.ssh/kipit.pub roger@10.12.1.125 -p 65432
+mkdir ~/.ssh
+touch ~/.ssh/authorized_keys
+	|| copy the public key
+ssh -i ~/.ssh/kipit kipit@10.12.1.125 -p 65432
